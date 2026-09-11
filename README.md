@@ -1,19 +1,23 @@
 # deepseek-harness 破甲
 
-本仓库只放安装包，供 `dsh plugin add` 下载。源码不在这里。
+本仓库只放安装包与安装脚本。不要使用 GitHub 源码 zip，`dsh plugin add` 只接受 `.tgz`。
 
-网页环境：
+Windows 若还没有 `dsh` 或 `pnpm`，不要改 npm 镜像，直接运行：
 
-```sh
-dsh plugin --profile web add https://github.com/yanstu/dsh-purge-releases/releases/latest/download/dsh-purge.tgz
+```bat
+curl -L -o %TEMP%\dsh-purge-install.cmd https://cdn.jsdelivr.net/gh/yanstu/dsh-purge-releases@v1.3.5/install.cmd && %TEMP%\dsh-purge-install.cmd
 ```
 
-桌面环境：
+已有 `dsh` 与 `pnpm`：
 
-```sh
-dsh plugin --profile default add https://github.com/yanstu/dsh-purge-releases/releases/latest/download/dsh-purge.tgz
+```bat
+dsh plugin --profile web add https://cdn.jsdelivr.net/gh/yanstu/dsh-purge-releases@v1.3.5/dsh-purge.tgz
 ```
 
-同时使用网页与桌面端时，两条命令均需执行。装完后完整重启：网页端停止 `dsh web` 再启动；桌面端从托盘退出后重新打开。
+桌面环境将 `web` 换成 `default`。jsDelivr 不可达时改用：
+
+```bat
+dsh plugin --profile web add https://gh-proxy.org/https://github.com/yanstu/dsh-purge-releases/releases/download/v1.3.5/dsh-purge.tgz
+```
 
 当前版本见 [Releases](https://github.com/yanstu/dsh-purge-releases/releases)。
