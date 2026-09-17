@@ -191,10 +191,15 @@ function Get-NodeMajor {
 }
 
 function Get-NodeArch {
-  if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') {
+  $arch = $env:PROCESSOR_ARCHITECTURE
+  $wow = $env:PROCESSOR_ARCHITEW6432
+  if (($arch -eq 'ARM64') -or ($wow -eq 'ARM64')) {
     return 'arm64'
   }
-  return 'x64'
+  if (($arch -eq 'AMD64') -or ($wow -eq 'AMD64')) {
+    return 'x64'
+  }
+  return 'x86'
 }
 
 function Get-NodeLts([string]$FileTag) {
