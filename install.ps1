@@ -1,6 +1,11 @@
+# Windows PowerShell 2+ / PowerShell 7
 $ErrorActionPreference = 'Stop'
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-[Net.ServicePointManager]::Expect100Continue = $false
+try {
+  [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072
+} catch {
+  try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]3072 } catch {}
+}
+try { [Net.ServicePointManager]::Expect100Continue = $false } catch {}
 
 $Boot = Join-Path $env:LOCALAPPDATA 'dsh-bootstrap'
 $NodeHome = Join-Path $Boot 'node'
@@ -12,18 +17,30 @@ $Repo = 'yanstu/dsh-purge-releases'
 $RegCn = 'https://registry.npmmirror.com'
 $RegIo = 'https://registry.npmjs.org'
 
+function Test-Blank([string]$Value) {
+  return ($null -eq $Value) -or ($Value.Trim().Length -eq 0)
+}
+
 function Write-Step([string]$Message) {
   Write-Host $Message
 }
 
 function Test-Cmd([string]$Name) {
-  $null -ne (Get-Command $Name -ErrorAction SilentlyContinue)
+  return ($null -ne (Get-Command $Name -ErrorAction SilentlyContinue))
+}
+
+function Copy-Stream($Source, $Dest) {
+  $buffer = New-Object byte[] 8192
+  while (($n = $Source.Read($buffer, 0, $buffer.Length)) -gt 0) {
+    $Dest.Write($buffer, 0, $n)
+  }
 }
 
 function Import-MachinePath {
   $machine = [Environment]::GetEnvironmentVariable('Path', 'Machine')
   $user = [Environment]::GetEnvironmentVariable('Path', 'User')
-  $env:Path = "$NodeHome;$NpmPrefix;$(Join-Path $env:AppData 'npm');$user;$machine;$env:Path"
+  $npmRoaming = Join-Path $env:AppData 'npm'
+  $env:Path = "$NodeHome;$NpmPrefix;$npmRoaming;$user;$machine;$env:Path"
 }
 
 function Add-UserPath([string]$Dir) {
@@ -31,7 +48,7 @@ function Add-UserPath([string]$Dir) {
     New-Item -ItemType Directory -Path $Dir -Force | Out-Null
   }
   $current = [Environment]::GetEnvironmentVariable('Path', 'User')
-  if ([string]::IsNullOrWhiteSpace($current)) {
+  if (Test-Blank $current) {
     $current = ''
   }
   $parts = @($current -split ';' | Where-Object { $_ -and ($_ -ne $Dir) })
@@ -39,6 +56,43 @@ function Add-UserPath([string]$Dir) {
   if ($env:Path -notlike "*$Dir*") {
     $env:Path = "$Dir;$env:Path"
   }
+}
+
+function Expand-ZipFile([string]$ZipPath, [string]$DestPath) {
+  if (Test-Path -LiteralPath $DestPath) {
+    Remove-Item -LiteralPath $DestPath -Recurse -Force
+  }
+  New-Item -ItemType Directory -Path $DestPath -Force | Out-Null
+  $zipFull = [IO.Path]::GetFullPath($ZipPath)
+  $destFull = [IO.Path]::GetFullPath($DestPath)
+  if (Get-Command Expand-Archive -ErrorAction SilentlyContinue) {
+    Expand-Archive -LiteralPath $zipFull -DestinationPath $destFull -Force
+    return
+  }
+  $ok = $false
+  try {
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [IO.Compression.ZipFile]::ExtractToDirectory($zipFull, $destFull)
+    $ok = $true
+  } catch {
+    $ok = $false
+  }
+  if ($ok) {
+    return
+  }
+  $shell = New-Object -ComObject Shell.Application
+  $zipNs = $shell.NameSpace($zipFull)
+  $destNs = $shell.NameSpace($destFull)
+  if (-not $zipNs -or -not $destNs) {
+    throw '无法解压 Node.js 压缩包。'
+  }
+  $destNs.CopyHere($zipNs.Items(), 20)
+  $deadline = (Get-Date).AddSeconds(180)
+  do {
+    Start-Sleep -Seconds 1
+    $n = @($destNs.Items()).Count
+  } while (($n -lt 1) -and ((Get-Date) -lt $deadline))
+  Start-Sleep -Seconds 2
 }
 
 function Save-Url {
@@ -60,7 +114,7 @@ function Save-Url {
     foreach ($extra in @(@(), @('--ipv4'))) {
       $curlArgs = @('-fsSL', '--connect-timeout', '12', '--max-time', "$TimeoutSec", '-A', 'dsh-purge-installer', '-o', $OutFile, $Url) + $extra
       & curl.exe @curlArgs 2>$null
-      if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $OutFile) -and ((Get-Item -LiteralPath $OutFile).Length -ge $MinBytes)) {
+      if (($LASTEXITCODE -eq 0) -and (Test-Path -LiteralPath $OutFile) -and ((Get-Item -LiteralPath $OutFile).Length -ge $MinBytes)) {
         return $true
       }
     }
@@ -76,14 +130,21 @@ function Save-Url {
       $src = $resp.GetResponseStream()
       $fs = [IO.File]::Create($OutFile)
       try {
-        $src.CopyTo($fs)
+        Copy-Stream $src $fs
       } finally {
-        $fs.Dispose()
+        $fs.Close()
       }
     } finally {
       $resp.Close()
     }
     return ((Get-Item -LiteralPath $OutFile).Length -ge $MinBytes)
+  } catch {
+  }
+  try {
+    $wc = New-Object Net.WebClient
+    $wc.Headers.Add('User-Agent', 'dsh-purge-installer')
+    $wc.DownloadFile($Url, $OutFile)
+    return ((Test-Path -LiteralPath $OutFile) -and ((Get-Item -LiteralPath $OutFile).Length -ge $MinBytes))
   } catch {
     return $false
   }
@@ -110,9 +171,9 @@ function Test-GzipFile([string]$Path) {
     if ($fs.Read($buf, 0, 2) -lt 2) {
       return $false
     }
-    return ($buf[0] -eq 0x1F -and $buf[1] -eq 0x8B)
+    return (($buf[0] -eq 0x1F) -and ($buf[1] -eq 0x8B))
   } finally {
-    $fs.Dispose()
+    $fs.Close()
   }
 }
 
@@ -129,23 +190,26 @@ function Get-NodeMajor {
 }
 
 function Get-NodeArch {
-  $arch = $env:PROCESSOR_ARCHITECTURE
-  if ($arch -eq 'ARM64') {
+  if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') {
     return 'arm64'
   }
   return 'x64'
 }
 
 function Get-NodeLts([string]$FileTag) {
+  if (-not (Get-Command ConvertFrom-Json -ErrorAction SilentlyContinue)) {
+    return $PinnedNode
+  }
   foreach ($idx in @('https://npmmirror.com/mirrors/node/index.json', 'https://nodejs.org/dist/index.json')) {
     $tmp = Join-Path $env:TEMP 'dsh-node-index.json'
     if (-not (Save-Url -Url $idx -OutFile $tmp -TimeoutSec 12 -MinBytes 100)) {
       continue
     }
     try {
-      $data = Get-Content -LiteralPath $tmp -Raw | ConvertFrom-Json
+      $text = [IO.File]::ReadAllText($tmp)
+      $data = $text | ConvertFrom-Json
       foreach ($row in $data) {
-        if ($row.lts -and $row.files -contains $FileTag) {
+        if ($row.lts -and ($row.files -contains $FileTag)) {
           return ([string]$row.version).TrimStart('v')
         }
       }
@@ -185,10 +249,7 @@ function Install-PortableNode {
     throw '无法下载 Node.js。请稍后重试，或先安装 Node.js 18 及以上再执行同一条命令。'
   }
   $extract = Join-Path $env:TEMP ("node-extract-" + $ver)
-  if (Test-Path -LiteralPath $extract) {
-    Remove-Item -LiteralPath $extract -Recurse -Force
-  }
-  Expand-Archive -LiteralPath $zip -DestinationPath $extract -Force
+  Expand-ZipFile -ZipPath $zip -DestPath $extract
   $inner = Get-ChildItem -LiteralPath $extract -Directory | Select-Object -First 1
   if (-not $inner) {
     throw 'Node.js 压缩包内容无效。'
@@ -204,32 +265,40 @@ function Install-PortableNode {
 
 function Resolve-Node {
   Import-MachinePath
-  $common = @(
-    $NodeHome,
-    (Join-Path $env:ProgramFiles 'nodejs'),
-    (Join-Path ${env:ProgramFiles(x86)} 'nodejs'),
-    (Join-Path $env:LOCALAPPDATA 'Programs\nodejs'),
-    (Join-Path $env:USERPROFILE 'scoop\apps\nodejs\current')
-  )
+  $common = New-Object System.Collections.ArrayList
+  [void]$common.Add($NodeHome)
+  if ($env:ProgramFiles) {
+    [void]$common.Add((Join-Path $env:ProgramFiles 'nodejs'))
+  }
+  $pf86 = ${env:ProgramFiles(x86)}
+  if ($pf86) {
+    [void]$common.Add((Join-Path $pf86 'nodejs'))
+  }
+  if ($env:LOCALAPPDATA) {
+    [void]$common.Add((Join-Path $env:LOCALAPPDATA 'Programs\nodejs'))
+  }
+  if ($env:USERPROFILE) {
+    [void]$common.Add((Join-Path $env:USERPROFILE 'scoop\apps\nodejs\current'))
+  }
   if ($env:NVM_HOME) {
-    $common += $env:NVM_HOME
+    [void]$common.Add($env:NVM_HOME)
   }
   foreach ($dir in $common) {
     if ($dir -and (Test-Path -LiteralPath (Join-Path $dir 'node.exe'))) {
       $env:Path = "$dir;$env:Path"
     }
   }
-  if ((Get-NodeMajor) -ge 18 -and (Test-Cmd 'npm')) {
+  if (((Get-NodeMajor) -ge 18) -and (Test-Cmd 'npm')) {
     return
   }
   Install-PortableNode
-  if ((Get-NodeMajor) -lt 18 -or -not (Test-Cmd 'npm')) {
+  if (((Get-NodeMajor) -lt 18) -or (-not (Test-Cmd 'npm'))) {
     throw '仍未找到 Node.js 18 或更高版本。'
   }
 }
 
 function Get-Registries {
-  $order = New-Object System.Collections.Generic.List[string]
+  $order = New-Object System.Collections.ArrayList
   if (Test-Url "$RegCn/@deepseek-ai/dsh") {
     [void]$order.Add($RegCn)
   }
@@ -358,7 +427,7 @@ if (-not (Test-Cmd 'pnpm')) {
 Save-Tarball
 
 $ProfileName = $args[0]
-if ([string]::IsNullOrWhiteSpace($ProfileName)) {
+if (Test-Blank $ProfileName) {
   Add-Plugin 'web'
   try {
     Add-Plugin 'default'
