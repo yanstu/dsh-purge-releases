@@ -1,4 +1,5 @@
 # Windows PowerShell 2+ / PowerShell 7
+try { Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force -ErrorAction SilentlyContinue } catch {}
 $ErrorActionPreference = 'Stop'
 try {
   [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072
